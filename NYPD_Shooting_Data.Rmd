@@ -1,0 +1,151 @@
+---
+title: "NYPD_Shooting_Analysis"
+date: "`r Sys.Date()`"
+output:
+  pdf: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r start_packages, include=FALSE}
+library(tidyverse)
+library(lubridate)
+```
+
+## **Read in Data**
+The data is provided by the city of New York and contains age, sex and race of the victim as well as the perpetrator if avaiable.
+It also contains information about the location of the shooting(borough, longitude and latitude) as well as time and date of location. Also the data includes whether perpetrators where statistically flagged for murder or not.
+
+```{r read_data, echo=TRUE}
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+shootings <- read_csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+## **Clean Data**
+```{r clean_data}
+# filter relevant columns, change occurence date to date format, arrange in order of boroughs and year, and add Case numbers to make it countable
+shoot_sort <- select(shootings, c("BORO",'OCCUR_DATE', "OCCUR_TIME", "PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE", "VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE")) %>%
+  mutate(YEAR=year(mdy(OCCUR_DATE))) %>% 
+  arrange(BORO, YEAR) %>%
+  mutate(CASES = 1) %>%
+  select(c(BORO, YEAR, PERP_RACE, VIC_RACE, VIC_SEX, VIC_AGE_GROUP, CASES))
+```
+
+## **Analysis 1:** What borough has the highest amount of shootings? What are the trends in all the boroughs?
+```{r shooting_by_borough}
+#make a new variable with shootings summed up by year and borough
+shoot_year <- shoot_sort %>% 
+  group_by(BORO, YEAR) %>%
+  summarize(SHOOTINGS = sum(CASES)) %>%
+  ungroup()
+
+shoot_year %>%
+  ggplot(aes(x = YEAR, y = SHOOTINGS)) +
+  geom_line(aes(color = BORO)) +
+  geom_point(aes(color = BORO)) +
+  labs(title = "Shootings in New York") +
+  xlab("Year")+
+  ylab("Shootings")
+```
+This graph shows that shootings are highest in the Bronx and Brooklyn, while shootings sharply increased in all boroughs in 2018/2019. 
+**Further Questions:** What caused the slow drop in shootings among all Boroughs (as a whole and individually) from 2011-2017 and what caused the rise in shootings since 2019?
+
+## **Analysis 2:** Why does Staten Island have such a low number of incidences compared to the rest of the boroughs? How do boroughs compare once we account for population size?
+```{r normalize_population}
+#quick search shows populations of boroughs from census in 2010:
+#https://www1.nyc.gov/assets/planning/download/office/planning-level/nyc-population/census2010/t_pl_p5_nyc.xlsx
+pop <- tibble(BORO = c("BRONX", "BROOKLYN", "MANHATTAN", 
+                       "QUEENS", "STATEN ISLAND"),
+              POPULATION = c(1385108, 2504700, 1585873,
+                             2230722, 468730))
+#adjust shootings relative to population of boroughs
+shoot_pop <- shoot_year %>% 
+  left_join(pop) %>%
+  mutate(SHOOT_PER_THOU = SHOOTINGS*1000/POPULATION)
+
+#graph shootings per thousand
+shoot_pop %>%
+  ggplot(aes(x = YEAR, y = SHOOT_PER_THOU)) +
+  geom_line(aes(color = BORO)) +
+  geom_point(aes(color = BORO)) +
+  labs(title = "Shootings per Thousand in New York") +
+  ylab("Shootings per Thousand") +
+  xlab("Year")
+```
+Adjusting for population shows that the Bronx not only has the highest absolute number of shootings, but also that it has twice as many shootings as the next borough.
+Also this shows that Staten Island not only has the lowest amount of shootings absolutely but also relative to its population.
+
+**Possible Bias** 
+One clear specific bias is that the population data only comes from 2010 and was not adjusted for growth/decay before and after 2010. Another source of bias is my personal bias - especially having only beginner knowledge of R and Statistics I chose to do a simple analysis rather than something in more depth. This can be mitigated in the future by building my knowledge and confidence in these two areas. 
+Another possible bias is the data itself (how was it collected, why was race categorized in these specific categories, etc.) 
+
+## **Analysis 3**: Is there an association between the number of black victims and boroughs?
+```{r black_by_neighborhood}
+black <- shoot_sort %>%
+  group_by(BORO, VIC_RACE) %>%
+  summarize(SHOOTINGS =sum(CASES)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = VIC_RACE,
+              values_from = SHOOTINGS) %>%
+  as.data.frame()
+black[is.na(black)] <- 0
+black <- black %>%
+  mutate(NONBLACK = rowSums(black[, -c(1,4,6)])) %>%
+  select(BORO, BLACK, NONBLACK) 
+
+black2 <- black %>%
+  pivot_longer(cols = c(BLACK, NONBLACK),
+               names_to = "RACE",
+               values_to = "SHOOTINGS")
+
+#boxplot of black victims and other victims by boroough
+ggplot(black2, aes(x=BORO, y=SHOOTINGS, fill=RACE)) +
+  geom_bar(position="fill", stat="identity") +
+  labs(title = "Ratio of Black victims to Non-Black victims in New York", y=NULL) +
+  xlab("Borough")
+```
+This graph shows that the ratio of black victims to others varies quite a bit between the boroughs.
+Therefore we will do a Chi Square analysis to see whether the association between boroughs and
+black victims is statistically significant.
+
+
+```{r model_black_victims}
+#reformat data into a contingency table for Chi Square Analysis
+black3 <- shoot_sort
+black3[black3 == "BLACK HISPANIC"|
+         black3 == "AMERICAN INDIAN/ALASKAN NATIVE"|
+         black3 == "WHITE HISPANIC"|
+         black3 == "WHITE"|
+         black3 == "UNKNOWN"|
+         black3 == "ASIAN / PACIFIC ISLANDER"] <- "Non Black"
+black3[black3 == "BLACK"] <- "Black"
+
+blacktable <- table(black3$BORO, black3$VIC_RACE)
+
+#Chi Square Test
+chisq <- chisq.test(blacktable)
+chisq
+chisq$observed
+round(chisq$expected,0)
+round(chisq$residuals,0)
+```
+Since the p-value is near zero (and far below 0.05) we can reject the 
+Null-Hypothesis(=variables are not related). We can conclude that different 
+Boroughs are associated with the race of the shooting victim with statistical
+significance. Looking at the observed vs expected counts, and looking at the 
+pearson residuals we can see that Brooklyn has much more black victims than is to be expected.
+
+Bias: However there was no information on the relative population of each borough,
+so there is a strong potential bias present since the Analysis did not account 
+for this - perhaps the number of black victims is higher in Brooklyn because
+the relative population of black people is higher in Brooklyn than other states.
+
+**In Conclusion**
+In Conclusion the Bronx has by far the highest number of shootings, whereas Staten Island has the smallest number absolutely and relatively.
+Also there is a very strong association between the number of black victims and which borough they were shot in. The biggest outliers are the Bronx and Brooklyn. In the Bronx there were 991 less black victims than would be expected and in Brooklyn there were 1237 more black victims than would be expected. Of course this analysis has a strong bias, since this analysis did not adjust for the relative population of each race in the seperate boroughs. 
+
+```{r}
+sessionInfo()
+```
+
